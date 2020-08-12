@@ -27,7 +27,7 @@ local function gen_outbound(node, tag)
                 local node_type = (proto and proto ~= "nil") and proto or "socks"
                 local new_port = sys.exec(string.format("echo -n $(/usr/share/%s/app.sh get_new_port auto tcp)", appname))
                 node.port = new_port
-                sys.call(string.format("/usr/share/%s/app.sh run_socks %s %s %s %s %s", 
+                sys.call(string.format("/usr/share/%s/app.sh run_socks %s %s %s %s %s > /dev/null", 
                     appname,
                     node_id,
                     "127.0.0.1",
@@ -39,16 +39,17 @@ local function gen_outbound(node, tag)
                 node.transport = "tcp"
                 node.address = "127.0.0.1"
             end
+            node.stream_security = "none"
         end
         result = {
             tag = tag,
-            protocol = node.protocol or "vmess",
+            protocol = node.protocol,
             mux = {
                 enabled = (node.mux == "1") and true or false,
                 concurrency = (node.mux_concurrency) and tonumber(node.mux_concurrency) or 8
             },
             -- 底层传输配置
-            streamSettings = (node.protocol == "vmess" or node.protocol == "socks" or node.protocol == "shadowsocks") and {
+            streamSettings = (node.protocol == "vmess" or node.protocol == "vless" or node.protocol == "socks" or node.protocol == "shadowsocks") and {
                 network = node.transport,
                 security = node.stream_security,
                 tlsSettings = (node.stream_security == "tls") and {
@@ -75,6 +76,7 @@ local function gen_outbound(node, tag)
                     congestion = (node.mkcp_congestion == "1") and true or false,
                     readBufferSize = tonumber(node.mkcp_readBufferSize),
                     writeBufferSize = tonumber(node.mkcp_writeBufferSize),
+                    seed = (node.mkcp_seed and node.mkcp_seed ~= "") and node.mkcp_seed or nil,
                     header = {type = node.mkcp_guise}
                 } or nil,
                 wsSettings = (node.transport == "ws") and {
@@ -94,16 +96,17 @@ local function gen_outbound(node, tag)
                 } or nil
             } or nil,
             settings = {
-                vnext = (node.protocol == "vmess") and {
+                vnext = (node.protocol == "vmess" or node.protocol == "vless") and {
                     {
                         address = node.address,
                         port = tonumber(node.port),
                         users = {
                             {
-                                id = node.vmess_id,
+                                id = node.uuid,
                                 alterId = tonumber(node.alter_id),
-                                level = tonumber(node.vmess_level),
-                                security = node.security
+                                level = node.level and tonumber(node.level) or 0,
+                                security = node.security,
+                                encryption = node.encryption
                             }
                         }
                     }
@@ -112,9 +115,9 @@ local function gen_outbound(node, tag)
                     {
                         address = node.address,
                         port = tonumber(node.port),
-                        method = node.v_ss_encrypt_method or nil,
+                        method = node.method or nil,
                         password = node.password or "",
-                        ota = node.ss_ota == '1' and true or false,
+                        ota = node.ota == '1' and true or false,
                         users = (node.username and node.password) and
                             {{user = node.username, pass = node.password}} or nil
                     }
@@ -122,6 +125,12 @@ local function gen_outbound(node, tag)
             }
         }
     end
+
+    if node.transport == "mkcp" or node.transport == "ds" or node.transport == "quic" then
+        result.streamSettings.security = "none"
+        result.streamSettings.tlsSettings = nil
+    end
+
     return result
 end
 
@@ -241,7 +250,7 @@ table.insert(outbounds, {protocol = "freedom", tag = "direct", settings = {keep 
 
 local v2ray = {
     log = {
-        -- error = "/var/log/v2ray.log",
+        -- error = string.format("/var/etc/passwall/%s.log", node[".name"]),
         loglevel = "warning"
     },
     -- 传入连接

@@ -1,16 +1,6 @@
 local d = require "luci.dispatcher"
-local ipkg = require("luci.model.ipkg")
 local uci = require"luci.model.uci".cursor()
 local api = require "luci.model.cbi.passwall.api.api"
-
-local function is_finded(e)
-    local function get_customed_path(e)
-        return api.uci_get_type("global_app", e .. "_file")
-    end
-    return luci.sys.exec("find /usr/*bin %s -iname %s -type f" % {get_customed_path(e), e}) ~= "" and true or false
-end
-
-local function is_installed(e) return ipkg.installed(e) end
 
 local ssr_encrypt_method_list = {
     "none", "table", "rc2-cfb", "rc4", "rc4-md5", "rc4-md5-6", "aes-128-cfb",
@@ -50,11 +40,16 @@ local encrypt_methods_ss_aead = {
 }
 
 map = Map("passwall_server", translate("Server Config"))
-map.redirect = d.build_url("admin", "vpn", "passwall", "server")
+map.redirect = d.build_url("admin", "services", "passwall", "server")
 
 s = map:section(NamedSection, arg[1], "user", "")
 s.addremove = false
 s.dynamic = false
+
+share = s:option(DummyValue, "passwall_server", translate("Share Current"))
+share.rawhtml  = true
+share.template = "passwall/node_list/link_share_man"
+share.value = arg[1]
 
 enable = s:option(Flag, "enable", translate("Enable"))
 enable.default = "1"
@@ -65,19 +60,22 @@ remarks.default = translate("Remarks")
 remarks.rmempty = false
 
 type = s:option(ListValue, "type", translate("Type"))
-if is_finded("ssr-server") then
+if api.is_finded("ssr-server") then
     type:value("SSR", translate("ShadowsocksR"))
 end
-if is_installed("v2ray") or is_finded("v2ray") then
+if api.is_finded("v2ray") then
     type:value("V2ray", translate("V2ray"))
 end
-if is_installed("brook") or is_finded("brook") then
+if api.is_finded("brook") then
     type:value("Brook", translate("Brook"))
 end
-if is_installed("trojan") or is_finded("trojan") then
-    type:value("Trojan", translate("Trojan-Plus"))
+if api.is_finded("trojan-plus") or api.is_finded("trojan") then
+    type:value("Trojan", translate("Trojan"))
 end
-if is_installed("trojan-go") or is_finded("trojan-go") then
+if api.is_finded("trojan-plus") then
+    type:value("Trojan-Plus", translate("Trojan-Plus"))
+end
+if api.is_finded("trojan-go") then
     type:value("Trojan-Go", translate("Trojan-Go"))
 end
 
@@ -111,11 +109,18 @@ password.password = true
 password:depends("type", "SSR")
 password:depends("type", "Brook")
 password:depends("type", "Trojan")
-password:depends("type", "Trojan-Go")
+password:depends("type", "Trojan-Plus")
 password:depends({ type = "V2ray", protocol = "http" })
 password:depends({ type = "V2ray", protocol = "socks" })
 password:depends({ type = "V2ray", protocol = "shadowsocks" })
 password:depends({ type = "V2ray", protocol = "mtproto" })
+
+passwords = s:option(DynamicList, "passwords", translate("Password"))
+for i = 1, 3 do
+    local uuid = luci.sys.exec("echo -n $(cat /proc/sys/kernel/random/uuid)")
+    passwords:value(uuid)
+end
+passwords:depends("type", "Trojan-Go")
 
 ssr_encrypt_method = s:option(ListValue, "ssr_encrypt_method", translate("Encrypt Method"))
 for a, t in ipairs(ssr_encrypt_method_list) do ssr_encrypt_method:value(t) end
@@ -160,6 +165,7 @@ tcp_fast_open:value("false")
 tcp_fast_open:value("true")
 tcp_fast_open:depends("type", "SSR")
 tcp_fast_open:depends("type", "Trojan")
+tcp_fast_open:depends("type", "Trojan-Plus")
 tcp_fast_open:depends("type", "Trojan-Go")
 
 udp_forward = s:option(Flag, "udp_forward", translate("UDP Forward"))
@@ -193,13 +199,26 @@ stream_security:depends({ type = "V2ray", protocol = "vmess", transport = "h2" }
 stream_security:depends({ type = "V2ray", protocol = "socks" })
 stream_security:depends({ type = "V2ray", protocol = "shadowsocks" })
 stream_security:depends("type", "Trojan")
+stream_security:depends("type", "Trojan-Plus")
 stream_security:depends("type", "Trojan-Go")
-
+stream_security.validate = function(self, value)
+    if value == "none" and (type:formvalue(arg[1]) == "Trojan" or type:formvalue(arg[1]) == "Trojan-Plus") then
+        return nil, translate("'none' not supported for original Trojan.")
+    end
+    return value
+end
 -- [[ TLS部分 ]] --
 
 tls_sessionTicket = s:option(Flag, "tls_sessionTicket", translate("Session Ticket"))
 tls_sessionTicket.default = "0"
 tls_sessionTicket:depends("stream_security", "tls")
+
+tls_serverName = s:option(Value, "tls_serverName", translate("Domain"))
+tls_serverName:depends("stream_security", "tls")
+
+tls_allowInsecure = s:option(Flag, "tls_allowInsecure", translate("allowInsecure"), translate("Whether unsafe connections are allowed. When checked, V2Ray does not check the validity of the TLS certificate provided by the remote host."))
+tls_allowInsecure.default = "0"
+tls_allowInsecure:depends("stream_security", "tls")
 
 tls_certificateFile = s:option(Value, "tls_certificateFile", translate("Public key absolute path"), translate("as:") .. "/etc/ssl/fullchain.pem")
 tls_certificateFile:depends("stream_security", "tls")
@@ -271,25 +290,34 @@ for a, t in ipairs(header_type_list) do mkcp_guise:value(t) end
 mkcp_guise:depends("transport", "mkcp")
 
 mkcp_mtu = s:option(Value, "mkcp_mtu", translate("KCP MTU"))
+mkcp_mtu.default = "1350"
 mkcp_mtu:depends("transport", "mkcp")
 
 mkcp_tti = s:option(Value, "mkcp_tti", translate("KCP TTI"))
+mkcp_tti.default = "20"
 mkcp_tti:depends("transport", "mkcp")
 
 mkcp_uplinkCapacity = s:option(Value, "mkcp_uplinkCapacity", translate("KCP uplinkCapacity"))
+mkcp_uplinkCapacity.default = "5"
 mkcp_uplinkCapacity:depends("transport", "mkcp")
 
 mkcp_downlinkCapacity = s:option(Value, "mkcp_downlinkCapacity", translate("KCP downlinkCapacity"))
+mkcp_downlinkCapacity.default = "20"
 mkcp_downlinkCapacity:depends("transport", "mkcp")
 
 mkcp_congestion = s:option(Flag, "mkcp_congestion", translate("KCP Congestion"))
 mkcp_congestion:depends("transport", "mkcp")
 
 mkcp_readBufferSize = s:option(Value, "mkcp_readBufferSize", translate("KCP readBufferSize"))
+mkcp_readBufferSize.default = "1"
 mkcp_readBufferSize:depends("transport", "mkcp")
 
 mkcp_writeBufferSize = s:option(Value, "mkcp_writeBufferSize", translate("KCP writeBufferSize"))
+mkcp_writeBufferSize.default = "1"
 mkcp_writeBufferSize:depends("transport", "mkcp")
+
+mkcp_seed = s:option(Value, "mkcp_seed", translate("KCP Seed"))
+mkcp_seed:depends("transport", "mkcp")
 
 -- [[ WebSocket部分 ]]--
 
@@ -342,6 +370,8 @@ remote_enable = s:option(Flag, "remote_enable", translate("Enable Remote"), tran
 remote_enable.default = "1"
 remote_enable.rmempty = false
 remote_enable:depends("type", "Trojan")
+remote_enable:depends("type", "Trojan-Plus")
+remote_enable:depends("type", "Trojan-Go")
 
 remote_address = s:option(Value, "remote_address", translate("Remote Address"))
 remote_address.default = "127.0.0.1"
@@ -357,7 +387,7 @@ ss_aead:depends("type", "Trojan-Go")
 ss_aead.default = "0"
 
 ss_aead_method = s:option(ListValue, "ss_aead_method", translate("Encrypt Method"))
-for _, v in ipairs(encrypt_methods_ss_aead) do ss_aead_method:value(v, v:upper()) end
+for _, v in ipairs(encrypt_methods_ss_aead) do ss_aead_method:value(v, v) end
 ss_aead_method.default = "aead_aes_128_gcm"
 ss_aead_method.rmempty = false
 ss_aead_method:depends("ss_aead", "1")
